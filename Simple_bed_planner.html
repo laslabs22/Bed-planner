@@ -1,0 +1,375 @@
+
+<style>
+  .app{padding:1.5rem 0}
+  .controls{display:flex;gap:12px;align-items:flex-end;flex-wrap:wrap;margin-bottom:1.25rem}
+  .field{display:flex;flex-direction:column;gap:6px}
+  label{font-size:13px;color:var(--color-text-secondary)}
+  input[type=number]{width:90px}
+  .tabs{display:flex;margin-bottom:1rem;border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);overflow:hidden;width:fit-content}
+  .tab{padding:7px 20px;font-size:13px;cursor:pointer;background:var(--color-background-primary);color:var(--color-text-secondary);border:none;outline:none}
+  .tab.active{background:var(--color-background-secondary);color:var(--color-text-primary);font-weight:500}
+  .top{display:flex;gap:24px;flex-wrap:wrap}
+  .plant-list{display:flex;flex-direction:column;gap:8px;min-width:220px}
+  .plant-card{background:var(--color-background-primary);border:0.5px solid var(--color-border-tertiary);border-radius:var(--border-radius-md);padding:10px 12px;display:flex;align-items:center;gap:10px;cursor:pointer}
+  .plant-card.selected{border:1.5px solid #4A7A2E}
+  .dot{width:20px;height:20px;border-radius:50%;flex-shrink:0}
+  .plant-name{font-size:14px;font-weight:500;color:var(--color-text-primary)}
+  .plant-meta{font-size:12px;color:var(--color-text-secondary)}
+  .add-btn{margin-top:4px;width:100%}
+  .bed-wrap{background:var(--color-background-secondary);border-radius:var(--border-radius-lg);padding:1.5rem;display:flex;flex-direction:column;align-items:center;gap:10px}
+  canvas{border-radius:4px;display:block}
+  #canvas-top{border:2px solid #8B6914}
+  #canvas-front{border:2px solid #aaa}
+  .hint{font-size:13px;color:var(--color-text-secondary);text-align:center}
+  .placed{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+  .tag{font-size:12px;background:var(--color-background-secondary);border:0.5px solid var(--color-border-tertiary);border-radius:99px;padding:3px 10px;color:var(--color-text-secondary)}
+</style>
+
+<div class="app">
+  <div class="controls">
+    <div class="field"><label>Bredde (cm)</label><input type="number" id="width" value="200" min="10" max="1000" step="10"></div>
+    <div class="field"><label>Dybde (cm)</label><input type="number" id="depth" value="120" min="10" max="1000" step="10"></div>
+    <button onclick="redrawAll()">Opdater bed</button>
+  </div>
+  <div class="tabs">
+    <button class="tab active" onclick="setView('top',this)">Ovenfra</button>
+    <button class="tab" onclick="setView('front',this)">Forfra</button>
+  </div>
+  <div class="top">
+    <div class="plant-list" id="plant-list"></div>
+    <div style="flex:1;min-width:260px">
+      <div class="bed-wrap">
+        <canvas id="canvas-top"></canvas>
+        <canvas id="canvas-front" style="display:none"></canvas>
+        <div class="hint" id="hint">Klik på en plante for at markere · træk for at flytte</div>
+      </div>
+      <div class="placed" id="placed-tags"></div>
+    </div>
+  </div>
+</div>
+
+<script>
+const PLANTS = [
+  { name:'Lavendel',   spread:50,  height:60,  color:'#9B59B6', shape:'lavender'  },
+  { name:'Solsikke',   spread:40,  height:180, color:'#F1C40F', shape:'sunflower' },
+  { name:'Rudbeckia',  spread:45,  height:80,  color:'#E67E22', shape:'daisy'     },
+  { name:'Delphinium', spread:35,  height:150, color:'#2980B9', shape:'tower'     },
+  { name:'Kamille',    spread:30,  height:40,  color:'#E8D44D', shape:'daisy'     },
+  { name:'Rød pæon',   spread:70,  height:90,  color:'#C0392B', shape:'peony'     },
+];
+
+const MAX_W=520, MAX_H=320;
+let scale=1, placed=[], selectedIdx=0, currentView='top';
+let selectedPlantIdx=-1; // hvilken placeret plante er markeret
+let dragging=false, dragIdx=-1, dragOffX=0, dragOffY=0;
+let mouseDownPos=null;
+const DRAG_THRESHOLD=4; // pixels man skal trække før det tæller som drag
+
+function setView(view,btn){
+  currentView=view;
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('canvas-top').style.display   = view==='top'   ?'block':'none';
+  document.getElementById('canvas-front').style.display = view==='front' ?'block':'none';
+  redrawAll();
+}
+
+function buildPlantList(){
+  const el=document.getElementById('plant-list');
+  el.innerHTML='';
+  PLANTS.forEach((p,i)=>{
+    const card=document.createElement('div');
+    card.className='plant-card'+(i===selectedIdx?' selected':'');
+    card.innerHTML=`<div class="dot" style="background:${p.color};border:1px solid rgba(0,0,0,0.15)"></div>
+      <div><div class="plant-name">${p.name}</div>
+      <div class="plant-meta">Spredning ${p.spread} cm · Højde ${p.height} cm</div></div>`;
+    card.onclick=()=>{selectedIdx=i;buildPlantList()};
+    el.appendChild(card);
+  });
+  const btn=document.createElement('button');
+  btn.className='add-btn';
+  btn.textContent=`Tilføj ${PLANTS[selectedIdx].name} →`;
+  btn.onclick=()=>placePlant(
+    parseInt(document.getElementById('width').value)/2,
+    parseInt(document.getElementById('depth').value)/2
+  );
+  el.appendChild(btn);
+}
+
+function placePlant(xCm,yCm){
+  placed.push({plant:PLANTS[selectedIdx],x:xCm,y:yCm});
+  selectedPlantIdx=-1;
+  redrawAll(); updateTags();
+}
+
+function updateTags(){
+  document.getElementById('placed-tags').innerHTML=placed.map(pp=>
+    `<span class="tag" style="border-left:3px solid ${pp.plant.color}">${pp.plant.name}</span>`
+  ).join('');
+}
+
+function findPlantAt(xCm,yCm){
+  // Søg bagfra så øverste plante (tegnet sidst) prioriteres
+  for(let i=placed.length-1;i>=0;i--){
+    const pp=placed[i];
+    const dx=pp.x-xCm, dy=pp.y-yCm;
+    if(Math.sqrt(dx*dx+dy*dy)<pp.plant.spread/2) return i;
+  }
+  return -1;
+}
+
+// Returner krydsets centrum i canvas-pixels for en given plante
+function deleteButtonPos(pp){
+  const px=Math.round(pp.x*scale);
+  const py=Math.round(pp.y*scale);
+  const r=Math.round((pp.plant.spread/2)*scale);
+  return { x: px+r*0.72, y: py-r*0.72 };
+}
+
+function isOnDeleteButton(xPx,yPx,pp){
+  const btn=deleteButtonPos(pp);
+  const dx=xPx-btn.x, dy=yPx-btn.y;
+  return Math.sqrt(dx*dx+dy*dy)<10;
+}
+
+function redrawAll(){ drawTop(); drawFront(); }
+
+function drawTop(){
+  const wCm=parseInt(document.getElementById('width').value)||200;
+  const dCm=parseInt(document.getElementById('depth').value)||120;
+  scale=Math.min(MAX_W/wCm,MAX_H/dCm,1);
+  const pxW=Math.round(wCm*scale), pxH=Math.round(dCm*scale);
+  const canvas=document.getElementById('canvas-top');
+  canvas.width=pxW; canvas.height=pxH;
+  const ctx=canvas.getContext('2d');
+
+  // Baggrund
+  ctx.fillStyle='#7B5E2A'; ctx.fillRect(0,0,pxW,pxH);
+  ctx.fillStyle='#5D8A3C'; ctx.fillRect(4,4,pxW-8,pxH-8);
+  ctx.fillStyle='#4A7A2E';
+  for(let x=0;x<pxW-8;x+=18)
+    for(let y=0;y<pxH-8;y+=18)
+      if((x+y)%36===0) ctx.fillRect(4+x,4+y,14,14);
+
+  placed.forEach((pp,i)=>{
+    const px=Math.round(pp.x*scale), py=Math.round(pp.y*scale);
+    const r=Math.round((pp.plant.spread/2)*scale);
+    const isSel=(i===selectedPlantIdx);
+
+    // Markeringsring
+    if(isSel){
+      ctx.beginPath(); ctx.arc(px,py,r+5,0,Math.PI*2);
+      ctx.strokeStyle='white'; ctx.lineWidth=3; ctx.stroke();
+      ctx.beginPath(); ctx.arc(px,py,r+5,0,Math.PI*2);
+      ctx.strokeStyle='#333'; ctx.lineWidth=1.5;
+      ctx.setLineDash([5,4]); ctx.stroke(); ctx.setLineDash([]);
+    }
+
+    ctx.beginPath(); ctx.arc(px,py,r,0,Math.PI*2);
+    ctx.fillStyle=pp.plant.color+'99'; ctx.fill();
+    ctx.strokeStyle=pp.plant.color; ctx.lineWidth=2; ctx.stroke();
+
+    ctx.fillStyle='#fff';
+    ctx.font=`bold ${Math.max(10,Math.round(r*0.45))}px sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText(pp.plant.name[0],px,py);
+
+    // Slet-knap (rødt kryds) kun på markeret plante
+    if(isSel){
+      const btn=deleteButtonPos(pp);
+      ctx.beginPath(); ctx.arc(btn.x,btn.y,10,0,Math.PI*2);
+      ctx.fillStyle='#E74C3C'; ctx.fill();
+      ctx.fillStyle='white'; ctx.font='bold 13px sans-serif';
+      ctx.textAlign='center'; ctx.textBaseline='middle';
+      ctx.fillText('✕',btn.x,btn.y);
+    }
+  });
+}
+
+function drawFront(){
+  const wCm=parseInt(document.getElementById('width').value)||200;
+  const scaleX=Math.min(MAX_W/wCm,1);
+  const maxH=placed.length>0?Math.max(...placed.map(pp=>pp.plant.height)):200;
+  const GROUND_Y=280, pxW=Math.round(wCm*scaleX), pxH=GROUND_Y+30;
+  const scaleY=Math.min((GROUND_Y-20)/maxH,1.8);
+  const canvas=document.getElementById('canvas-front');
+  canvas.width=pxW; canvas.height=pxH;
+  const ctx=canvas.getContext('2d');
+  const sky=ctx.createLinearGradient(0,0,0,GROUND_Y);
+  sky.addColorStop(0,'#C9E8F8'); sky.addColorStop(1,'#E8F4FC');
+  ctx.fillStyle=sky; ctx.fillRect(0,0,pxW,GROUND_Y);
+  ctx.fillStyle='#7B5E2A'; ctx.fillRect(0,GROUND_Y,pxW,30);
+  ctx.fillStyle='#5D8A3C'; ctx.fillRect(0,GROUND_Y-6,pxW,8);
+  ctx.setLineDash([3,5]); ctx.lineWidth=1;
+  [50,100,150,200].forEach(hCm=>{
+    if(hCm>maxH+30) return;
+    const y=GROUND_Y-Math.round(hCm*scaleY);
+    ctx.strokeStyle='rgba(0,0,0,0.1)';
+    ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(pxW,y); ctx.stroke();
+    ctx.fillStyle='rgba(0,0,0,0.25)'; ctx.font='10px sans-serif';
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(hCm+' cm',4,y);
+  });
+  ctx.setLineDash([]);
+  [...placed].sort((a,b)=>a.y-b.y).forEach(pp=>{
+    const px=Math.round(pp.x*scaleX);
+    const h=Math.round(pp.plant.height*scaleY);
+    const rx=Math.round((pp.plant.spread/2)*scaleX);
+    drawPlant(ctx,pp.plant.shape,px,GROUND_Y,h,rx,pp.plant.color);
+    ctx.fillStyle='rgba(0,0,0,0.35)'; ctx.font='10px sans-serif';
+    ctx.textAlign='center'; ctx.textBaseline='top';
+    ctx.fillText(pp.plant.name,px,GROUND_Y+8);
+  });
+}
+
+function drawPlant(ctx,shape,px,groundY,h,rx,color){
+  if(shape==='lavender') drawLavender(ctx,px,groundY,h,rx,color);
+  else if(shape==='sunflower') drawSunflower(ctx,px,groundY,h,rx,color);
+  else if(shape==='daisy') drawDaisy(ctx,px,groundY,h,rx,color);
+  else if(shape==='tower') drawTower(ctx,px,groundY,h,rx,color);
+  else if(shape==='peony') drawPeony(ctx,px,groundY,h,rx,color);
+}
+
+function drawLavender(ctx,px,groundY,h,rx,color){
+  const bushRx=rx,bushRy=rx*0.88,bushCy=groundY-bushRy;
+  ctx.beginPath();ctx.ellipse(px,bushCy,bushRx,bushRy,0,0,Math.PI*2);ctx.fillStyle='#6A8E62';ctx.fill();
+  ctx.beginPath();ctx.ellipse(px-rx*0.1,bushCy-bushRy*0.1,bushRx*0.75,bushRy*0.75,0,0,Math.PI*2);ctx.fillStyle='#7A9E72';ctx.fill();
+  ctx.beginPath();ctx.ellipse(px,bushCy-bushRy*0.15,bushRx*0.55,bushRy*0.55,0,0,Math.PI*2);ctx.fillStyle='#9ACC90';ctx.fill();
+  for(let i=0;i<7;i++){
+    const t=i/6,angle=Math.PI+t*Math.PI;
+    const surfX=px+Math.cos(angle)*bushRx*0.8,surfY=bushCy+Math.sin(angle)*bushRy*0.8;
+    const tipX=surfX+(t-0.5)*rx*0.15,tipY=surfY-h*0.18;
+    ctx.strokeStyle='#6A8E62';ctx.lineWidth=Math.max(1.5,rx*0.07);ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(surfX,surfY);ctx.lineTo(tipX,tipY);ctx.stroke();
+    ctx.beginPath();ctx.ellipse(tipX,tipY-h*0.045,Math.max(2,rx*0.12),Math.max(4,h*0.09),0,0,Math.PI*2);
+    ctx.fillStyle=color;ctx.fill();
+  }
+}
+function drawSunflower(ctx,px,groundY,h,rx,color){
+  const stemW=Math.max(2,rx*0.18);
+  ctx.strokeStyle='#3A7D2C';ctx.lineWidth=stemW;ctx.lineCap='round';
+  ctx.beginPath();ctx.moveTo(px,groundY);ctx.lineTo(px,groundY-h*0.82);ctx.stroke();
+  ctx.beginPath();ctx.ellipse(px+rx*0.5,groundY-h*0.38,rx*0.42,h*0.08,0.5,0,Math.PI*2);ctx.fillStyle='#4A9A30';ctx.fill();
+  ctx.beginPath();ctx.ellipse(px-rx*0.5,groundY-h*0.55,rx*0.42,h*0.08,-0.5,0,Math.PI*2);ctx.fillStyle='#4A9A30';ctx.fill();
+  const fr=rx*0.9,fcy=groundY-h+fr*0.6;
+  for(let i=0;i<8;i++){const a=(i/8)*Math.PI*2;ctx.beginPath();ctx.ellipse(px+Math.cos(a)*fr*0.85,fcy+Math.sin(a)*fr*0.85,fr*0.28,fr*0.5,a,0,Math.PI*2);ctx.fillStyle=color+'ee';ctx.fill();}
+  ctx.beginPath();ctx.arc(px,fcy,fr*0.38,0,Math.PI*2);ctx.fillStyle='#5C3A00';ctx.fill();
+  ctx.beginPath();ctx.arc(px,fcy,fr*0.22,0,Math.PI*2);ctx.fillStyle='#7B4F00';ctx.fill();
+}
+function drawDaisy(ctx,px,groundY,h,rx,color){
+  const bodyRy=h*0.48;
+  ctx.beginPath();ctx.ellipse(px,groundY-bodyRy,rx,bodyRy,0,0,Math.PI*2);ctx.fillStyle='#3A7D2C';ctx.fill();
+  ctx.beginPath();ctx.ellipse(px,groundY-bodyRy,rx*0.75,bodyRy*0.75,0,0,Math.PI*2);ctx.fillStyle='#4A9A30';ctx.fill();
+  const count=Math.max(2,Math.round(rx/12)),fr=Math.max(4,rx*0.28);
+  for(let i=0;i<count;i++){
+    const t=count===1?0.5:i/(count-1);
+    const bx=px-rx*0.7+t*rx*1.4,by=groundY-h*0.76-Math.sin(t*Math.PI)*h*0.12;
+    for(let j=0;j<6;j++){const a=(j/6)*Math.PI*2;ctx.beginPath();ctx.ellipse(bx+Math.cos(a)*fr*0.8,by+Math.sin(a)*fr*0.8,fr*0.25,fr*0.45,a,0,Math.PI*2);ctx.fillStyle=color+'dd';ctx.fill();}
+    ctx.beginPath();ctx.arc(bx,by,fr*0.38,0,Math.PI*2);ctx.fillStyle='#5C3A00';ctx.fill();
+  }
+}
+function drawTower(ctx,px,groundY,h,rx,color){
+  const stemW=Math.max(2,rx*0.22);
+  ctx.fillStyle='#3A7D2C';ctx.beginPath();ctx.roundRect(px-stemW/2,groundY-h*0.8,stemW,h*0.8,2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(px,groundY-h*0.32,rx*0.7,h*0.13,-0.3,0,Math.PI*2);ctx.fillStyle='#4A9A30';ctx.fill();
+  ctx.beginPath();ctx.ellipse(px,groundY-h*0.55,rx*0.55,h*0.1,0.3,0,Math.PI*2);ctx.fillStyle='#4A9A30';ctx.fill();
+  const spireH=h*0.52,spireRx=rx*0.52,spireTop=groundY-h+spireH*0.1,steps=6;
+  for(let i=0;i<steps;i++){
+    const t=i/(steps-1),by=spireTop+t*spireH*0.85,bx=px+(i%2===0?1:-1)*spireRx*0.3,r=spireRx*(0.9-t*0.4);
+    ctx.beginPath();ctx.ellipse(bx,by,r,r*0.7,0,0,Math.PI*2);ctx.fillStyle=color+(i<2?'ff':'cc');ctx.fill();
+    ctx.strokeStyle=color;ctx.lineWidth=0.5;ctx.stroke();
+    ctx.beginPath();ctx.arc(bx,by,r*0.35,0,Math.PI*2);ctx.fillStyle='rgba(255,255,255,0.4)';ctx.fill();
+  }
+}
+function drawPeony(ctx,px,groundY,h,rx,color){
+  const bushRx=rx*1.1,bushRy=h*0.55,bushCy=groundY-bushRy*0.9;
+  ctx.beginPath();ctx.ellipse(px,bushCy,bushRx,bushRy,0,0,Math.PI*2);ctx.fillStyle='#3A7D2C';ctx.fill();
+  ctx.beginPath();ctx.ellipse(px,bushCy-bushRy*0.1,bushRx*0.8,bushRy*0.78,0,0,Math.PI*2);ctx.fillStyle='#4A9A30';ctx.fill();
+  [{ox:-0.5,oy:-0.55,r:0.38},{ox:0.5,oy:-0.52,r:0.36},{ox:-0.1,oy:-0.72,r:0.42},{ox:0.3,oy:-0.62,r:0.34}].forEach(f=>{
+    const fx=px+f.ox*bushRx,fy=bushCy+f.oy*bushRy,fr=f.r*bushRx;
+    ctx.beginPath();ctx.arc(fx,fy,fr,0,Math.PI*2);ctx.fillStyle=color;ctx.fill();
+    ctx.beginPath();ctx.arc(fx,fy,fr*0.65,0,Math.PI*2);ctx.fillStyle='#E74C3C';ctx.fill();
+    ctx.beginPath();ctx.arc(fx,fy,fr*0.3,0,Math.PI*2);ctx.fillStyle='#922B21';ctx.fill();
+  });
+}
+
+// --- Mus-events ---
+const canvasTop=document.getElementById('canvas-top');
+
+canvasTop.addEventListener('mousedown',function(e){
+  if(currentView!=='top') return;
+  const rect=this.getBoundingClientRect();
+  const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
+  const xCm=xPx/scale, yCm=yPx/scale;
+
+  // Tjek om man klikker på slet-knappen for den markerede plante
+  if(selectedPlantIdx>=0){
+    const pp=placed[selectedPlantIdx];
+    if(isOnDeleteButton(xPx,yPx,pp)){
+      placed.splice(selectedPlantIdx,1);
+      selectedPlantIdx=-1;
+      redrawAll(); updateTags();
+      return;
+    }
+  }
+
+  const found=findPlantAt(xCm,yCm);
+  if(found>=0){
+    // Klik på plante: markér og gør klar til drag
+    selectedPlantIdx=found;
+    dragIdx=found;
+    dragOffX=xCm-placed[found].x;
+    dragOffY=yCm-placed[found].y;
+    mouseDownPos={x:xPx,y:yPx};
+    dragging=false;
+    drawTop();
+  } else {
+    // Klik på tomt sted: afmarkér og tilføj ny plante
+    selectedPlantIdx=-1;
+    placePlant(xCm,yCm);
+  }
+});
+
+canvasTop.addEventListener('mousemove',function(e){
+  if(dragIdx<0) return;
+  const rect=this.getBoundingClientRect();
+  const xPx=e.clientX-rect.left, yPx=e.clientY-rect.top;
+
+  if(!dragging){
+    const dx=xPx-mouseDownPos.x, dy=yPx-mouseDownPos.y;
+    if(Math.sqrt(dx*dx+dy*dy)>DRAG_THRESHOLD) dragging=true;
+  }
+
+  if(dragging){
+    const xCm=xPx/scale, yCm=yPx/scale;
+    placed[dragIdx].x=xCm-dragOffX;
+    placed[dragIdx].y=yCm-dragOffY;
+    this.style.cursor='grabbing';
+    redrawAll();
+  }
+});
+
+canvasTop.addEventListener('mouseup',function(){
+  if(dragging) this.style.cursor='default';
+  dragging=false;
+  dragIdx=-1;
+  mouseDownPos=null;
+});
+
+canvasTop.addEventListener('mouseleave',function(){
+  dragging=false;
+  dragIdx=-1;
+  mouseDownPos=null;
+  this.style.cursor='default';
+});
+
+canvasTop.addEventListener('mousemove',function(e){
+  if(dragIdx>=0) return; // håndteres ovenfor
+  const rect=this.getBoundingClientRect();
+  const xCm=(e.clientX-rect.left)/scale, yCm=(e.clientY-rect.top)/scale;
+  const found=findPlantAt(xCm,yCm);
+  this.style.cursor=found>=0?'grab':'crosshair';
+});
+
+buildPlantList(); redrawAll();
+</script>
